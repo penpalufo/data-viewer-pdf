@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="ja">
+	<head>
+		<!-- 文字コード、画面サイズ、検索結果などで使われるページ情報です。 -->
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<meta name="description" content="Excelファイルをブラウザ上で閲覧し、列を指定して正規表現検索できるデータビューアー" />
+		<title>Excel Data Viewer</title>
+		<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230f766e'/%3E%3Cpath d='M18 16h28v32H18z' fill='white' opacity='.96'/%3E%3Cpath d='M18 25h28M18 35h28M29 16v32' stroke='%230f766e' stroke-width='3'/%3E%3C/svg%3E" />
+
+		<!-- 画面デザインと、ローカル保存したVue・SheetJS・アプリ本体を読み込みます。 -->
+		<link rel="stylesheet" href="./style.css?v=0.3.3" />
+		<script src="./vendor/vue.global.prod.js"></script>
+		<script src="./vendor/xlsx.full.min.js"></script>
+		<script type="module" src="./app.js?v=0.3.3"></script>
+	</head>
+	<body>
+		<!-- Vueが操作するアプリ全体の領域です。読み込み前はv-cloakで非表示にします。 -->
+		<div id="app" v-cloak>
+			<!-- アプリ名と現在のバージョンを表示します。 -->
+			<header class="app-header">
+				<div>
+					<p class="eyebrow">DATA WORKSPACE</p>
+					<h1>Excel Data Viewer</h1>
+				</div>
+				<span class="version" :title="`リリース日 ${releaseDate}`">v{{ appVersion }}</span>
+			</header>
+
+			<main>
+				<!-- Excelファイルのドラッグ＆ドロップとファイル選択を受け付けます。 -->
+				<section
+					class="drop-zone"
+					:class="{ 'is-dragging': isDragging, 'is-loading': isLoading, 'has-data': headers.length }"
+					@dragenter.prevent="isDragging = true"
+					@dragover.prevent="isDragging = true"
+					@dragleave.prevent="handleDragLeave"
+					@drop.prevent="handleDrop"
+				>
+					<div class="file-mark" aria-hidden="true">XLSX</div>
+					<div class="drop-copy">
+						<strong>{{ isLoading ? 'ファイルを読み込んでいます…' : headers.length ? '別のExcelファイルを読み込む' : 'Excelファイルをここにドロップ' }}</strong>
+						<span>.xlsx / .xls・読み込み後に表示するシートを選べます</span>
+					</div>
+					<label class="file-button" :class="{ disabled: isLoading }">
+						ファイルを選択
+						<input type="file" accept=".xlsx,.xls" :disabled="isLoading" @change="handleFileSelect" />
+					</label>
+				</section>
+
+				<!-- ファイル形式や読み込み処理のエラーを表示します。 -->
+				<p v-if="errorMessage" class="message error" role="alert">{{ errorMessage }}</p>
+
+				<!-- Excel読み込み後だけ、操作欄とデータ表を表示します。 -->
+				<template v-if="headers.length">
+					<!-- ファイル情報、シート選択、検索条件、保存ボタンをまとめた操作欄です。 -->
+					<section class="data-toolbar" aria-label="データ検索">
+						<div class="file-summary">
+							<span class="status-dot" aria-hidden="true"></span>
+							<div>
+								<strong>{{ fileName }}</strong>
+								<span>{{ sheetNames.length }}シート・選択中は{{ formatNumber(rows.length) }}件</span>
+							</div>
+						</div>
+
+						<div class="search-controls">
+							<label class="sheet-field">
+								<span>表示するシート</span>
+								<select v-model="selectedSheetName" @change="loadSelectedSheet">
+									<option v-for="sheetName in sheetNames" :key="sheetName" :value="sheetName">
+										{{ sheetName }}
+									</option>
+								</select>
+							</label>
+							<!-- 選択した列で、検索結果内の直前行から値が変わったセルを強調します。 -->
+							<details class="highlight-control">
+								<summary>
+									<span>変化を強調する列</span>
+									<strong>{{ highlightSelectionLabel }}</strong>
+								</summary>
+								<div class="highlight-panel">
+									<div class="highlight-panel-actions">
+										<button type="button" @click="selectAllHighlightColumns">すべて選択</button>
+										<button type="button" @click="clearHighlightColumns">すべて解除</button>
+									</div>
+									<div class="highlight-column-list">
+										<label v-for="(header, index) in headers" :key="`${header}-${index}`">
+											<input
+												type="checkbox"
+												:checked="highlightedColumnIndexes.includes(index)"
+												@change="toggleHighlightColumn(index, $event.target.checked)"
+											/>
+											<span>{{ header }}</span>
+										</label>
+									</div>
+								</div>
+							</details>
+							<label class="case-toggle">
+								<input v-model="caseSensitive" type="checkbox" />
+								<span>大文字・小文字を区別</span>
+							</label>
+							<button type="button" class="clear-button" :disabled="!searchText1 && !searchText2" @click="clearSearch">クリア</button>
+							<button type="button" class="save-button" @click="saveWorkbook">
+								Excelを保存
+								<span v-if="editedCellCount">{{ editedCellCount }}セル編集</span>
+							</button>
+							<!-- 検索条件は固定2セットで、入力された条件をAND評価します。 -->
+							<div class="and-search">
+								<div class="and-search-heading">
+									<strong>固定2条件のAND検索</strong>
+									<span>条件2が空欄の場合は条件1だけで検索します</span>
+								</div>
+								<div class="search-condition-row">
+									<span class="condition-badge">条件1</span>
+									<label class="compact-field">
+										<span>検索する列</span>
+										<select v-model.number="selectedHeaderIndex1" aria-label="条件1の検索する列">
+											<option v-for="(header, index) in headers" :key="`${header}-${index}`" :value="index">
+												{{ header }}
+											</option>
+										</select>
+									</label>
+									<label class="search-field compact-field">
+										<span>正規表現</span>
+										<input
+											v-model="searchText1"
+											type="search"
+											placeholder="例: ^DP.*E$"
+											aria-label="条件1の正規表現"
+											spellcheck="false"
+											:aria-invalid="Boolean(searchError1)"
+										/>
+										<small v-if="searchError1" class="inline-regex-error">{{ searchError1 }}</small>
+									</label>
+								</div>
+								<div class="and-divider"><span>AND</span></div>
+								<div class="search-condition-row">
+									<span class="condition-badge">条件2</span>
+									<label class="compact-field">
+										<span>検索する列</span>
+										<select v-model.number="selectedHeaderIndex2" aria-label="条件2の検索する列">
+											<option v-for="(header, index) in headers" :key="`${header}-${index}`" :value="index">
+												{{ header }}
+											</option>
+										</select>
+									</label>
+									<label class="search-field compact-field">
+										<span>正規表現</span>
+										<input
+											v-model="searchText2"
+											type="search"
+											placeholder="未入力なら無視"
+											aria-label="条件2の正規表現"
+											spellcheck="false"
+											:aria-invalid="Boolean(searchError2)"
+										/>
+										<small v-if="searchError2" class="inline-regex-error">{{ searchError2 }}</small>
+									</label>
+								</div>
+							</div>
+						</div>
+					</section>
+
+					<!-- 検索後の表示件数と正規表現エラーを表示します。 -->
+					<div class="result-bar">
+						<span><strong>{{ formatNumber(filteredRows.length) }}</strong> 件を表示・セルをクリックして全文表示／編集</span>
+						<span v-if="searchError1 || searchError2" class="regex-error" role="alert">正規表現を確認してください</span>
+					</div>
+
+					<!-- 見出しを固定し、クリックしたデータセルをモーダルで編集できる表です。 -->
+					<section class="table-shell" aria-label="Excelデータ">
+						<table>
+							<thead>
+								<tr>
+									<th class="row-number">#</th>
+									<th v-for="(header, index) in headers" :key="`${header}-${index}`">{{ header }}</th>
+								</tr>
+							</thead>
+							<tbody>
+								<tr v-for="(item, resultIndex) in visibleRows" :key="item.sourceIndex">
+									<td class="row-number">{{ item.sourceIndex + 2 }}</td>
+									<td
+										v-for="(_, index) in headers"
+										:key="index"
+										:class="{
+											'editable-cell': true,
+											'value-changed': isDifferentFromPrevious(resultIndex, index)
+										}"
+										:title="displayValue(item.row[index])"
+										@click="openCellModal(item.sourceIndex, index)"
+									>
+										<a
+											v-if="isCatalogPageColumn(index) && getCatalogPageUrl(item.row[index])"
+											class="catalog-link"
+											:href="getCatalogPageUrl(item.row[index])"
+											target="catalog"
+											@click.stop
+										>
+											{{ displayValue(item.row[index]) }}
+										</a>
+										<template v-else>{{ displayValue(item.row[index]) }}</template>
+									</td>
+								</tr>
+								<tr v-if="!visibleRows.length">
+									<td class="empty-cell" :colspan="headers.length + 1">一致するデータがありません</td>
+								</tr>
+							</tbody>
+						</table>
+					</section>
+					<p v-if="filteredRows.length > displayLimit" class="limit-note">
+						動作を軽くするため、先頭{{ formatNumber(displayLimit) }}件を表示しています。
+					</p>
+				</template>
+
+				<!-- Excelを読み込む前に表示する案内です。 -->
+				<section v-else class="empty-state">
+					<span>準備完了</span>
+					<p>ファイルは外部へ送信されず、このブラウザ内だけで処理されます。</p>
+				</section>
+			</main>
+
+			<!-- セルの全文を確認・編集するモーダルです。背景クリックまたはEscで閉じます。 -->
+			<div
+				v-if="editingCell"
+				class="modal-backdrop"
+				role="presentation"
+				@mousedown.self="closeCellModal"
+				@keydown.esc="closeCellModal"
+			>
+				<section class="cell-modal" role="dialog" aria-modal="true" aria-labelledby="cell-modal-title">
+					<header class="modal-header">
+						<div>
+							<p class="modal-eyebrow">{{ selectedSheetName }}・{{ editingCell.address }}</p>
+							<h2 id="cell-modal-title">{{ editingCell.header }}</h2>
+						</div>
+						<button type="button" class="modal-close" aria-label="閉じる" @click="closeCellModal">×</button>
+					</header>
+					<label class="modal-editor">
+						<span>セルの内容</span>
+						<textarea
+							ref="cellEditor"
+							v-model="editingValue"
+							spellcheck="false"
+							@keydown.ctrl.enter.prevent="saveCellEdit"
+						></textarea>
+					</label>
+					<p class="modal-help">Ctrl＋Enterで反映できます。</p>
+					<footer class="modal-actions">
+						<button type="button" class="modal-cancel" @click="closeCellModal">キャンセル</button>
+						<button type="button" class="modal-save" @click="saveCellEdit">反映</button>
+					</footer>
+				</section>
+			</div>
+		</div>
+	</body>
+</html>
