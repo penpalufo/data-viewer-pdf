@@ -9,10 +9,10 @@
 		<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230f766e'/%3E%3Cpath d='M18 16h28v32H18z' fill='white' opacity='.96'/%3E%3Cpath d='M18 25h28M18 35h28M29 16v32' stroke='%230f766e' stroke-width='3'/%3E%3C/svg%3E" />
 
 		<!-- 画面デザインと、ローカル保存したVue・SheetJS・アプリ本体を読み込みます。 -->
-		<link rel="stylesheet" href="./style.css?v=0.3.3" />
+		<link rel="stylesheet" href="./style.css?v=0.10.0-marker" />
 		<script src="./vendor/vue.global.prod.js"></script>
 		<script src="./vendor/xlsx.full.min.js"></script>
-		<script type="module" src="./app.js?v=0.3.3"></script>
+		<script type="module" src="./app.js?v=0.10.0-folder"></script>
 	</head>
 	<body>
 		<!-- Vueが操作するアプリ全体の領域です。読み込み前はv-cloakで非表示にします。 -->
@@ -38,12 +38,12 @@
 				>
 					<div class="file-mark" aria-hidden="true">XLSX</div>
 					<div class="drop-copy">
-						<strong>{{ isLoading ? 'ファイルを読み込んでいます…' : headers.length ? '別のExcelファイルを読み込む' : 'Excelファイルをここにドロップ' }}</strong>
-						<span>.xlsx / .xls・読み込み後に表示するシートを選べます</span>
+						<strong>{{ isLoading ? 'フォルダーを読み込んでいます…' : headers.length ? '別のデータフォルダーを読み込む' : 'データフォルダーをここにドロップ' }}</strong>
+						<span>同じフォルダーにある同名の.xlsx・.pdf・.jsonを読み込みます</span>
 					</div>
 					<label class="file-button" :class="{ disabled: isLoading }">
-						ファイルを選択
-						<input type="file" accept=".xlsx,.xls" :disabled="isLoading" @change="handleFileSelect" />
+						フォルダーを選択
+						<input type="file" webkitdirectory directory multiple :disabled="isLoading" @change="handleFileSelect" />
 					</label>
 				</section>
 
@@ -164,10 +164,12 @@
 					<div class="result-bar">
 						<span><strong>{{ formatNumber(filteredRows.length) }}</strong> 件を表示・セルをクリックして全文表示／編集</span>
 						<span v-if="searchError1 || searchError2" class="regex-error" role="alert">正規表現を確認してください</span>
+						<span v-else class="pdf-status" :class="{ active: hasPdfViewer }">{{ pdfStatus }}</span>
 					</div>
 
-					<!-- 見出しを固定し、クリックしたデータセルをモーダルで編集できる表です。 -->
-					<section class="table-shell" aria-label="Excelデータ">
+					<!-- PDF連動時は表とPDFを左右へ並べ、Excel単体時は従来どおり表だけを表示します。 -->
+					<div class="viewer-layout" :class="{ 'has-pdf': hasPdfViewer }">
+					<section class="table-shell" aria-label="Excelデータ" @mouseleave="clearPdfMarker">
 						<table>
 							<thead>
 								<tr>
@@ -186,6 +188,7 @@
 											'value-changed': isDifferentFromPrevious(resultIndex, index)
 										}"
 										:title="displayValue(item.row[index])"
+										@mouseenter="showPdfMarker(item.sourceIndex, index)"
 										@click="openCellModal(item.sourceIndex, index)"
 									>
 										<a
@@ -206,6 +209,22 @@
 							</tbody>
 						</table>
 					</section>
+					<section v-if="hasPdfViewer" class="pdf-panel" aria-label="PDFプレビュー">
+						<header class="pdf-toolbar">
+							<div>
+								<strong>{{ pdfFileName }}</strong>
+								<span>ページ {{ pdfPageNumber }} / {{ pdfPageCount }}</span>
+							</div>
+							<button type="button" @click="renderCurrentPdfPage">表示を合わせる</button>
+						</header>
+						<div ref="pdfScroll" class="pdf-scroll">
+							<div ref="pdfStage" class="pdf-stage" :style="pdfStageStyle">
+								<canvas ref="pdfCanvas"></canvas>
+								<div v-if="pdfMarker" ref="pdfMarker" class="pdf-marker" :style="pdfMarkerStyle" aria-hidden="true"></div>
+							</div>
+						</div>
+					</section>
+					</div>
 					<p v-if="filteredRows.length > displayLimit" class="limit-note">
 						動作を軽くするため、先頭{{ formatNumber(displayLimit) }}件を表示しています。
 					</p>

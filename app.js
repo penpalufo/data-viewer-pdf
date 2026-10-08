@@ -1,5 +1,6 @@
 /* Excel Data Viewer
 	* Version history:
+	* 0.10.0 (2026-10-08) Added linked PDF display and coordinate markers.
 	* 0.3.3 (2026-09-29) Added catalog links to publication page cells.
 	* 0.3.2 (2026-09-29) Applied value-change highlighting within filtered results.
 	* 0.3.1 (2026-09-29) Added a fixed two-condition AND regex search.
@@ -26,10 +27,13 @@ import {
 	toggleSelectedColumn
 } from './js/highlight.js'
 import { displayValue, formatNumber, getCatalogPageUrl } from './js/utils.js'
+import { createCoordinateIndex, getCellCoordinate } from './js/coordinates.js'
+import { loadPdfDocument, renderPdfPage } from './js/pdf.js?v=0.10.0-fix1'
+import { findSiblingFile, getDroppedFiles } from './js/files.js?v=0.10.0-folder'
 
 // アプリ全体で使用するバージョン情報と表示件数の上限です。
-const APP_VERSION = '0.3.3'
-const RELEASE_DATE = '2026-09-29'
+const APP_VERSION = '0.10.0'
+const RELEASE_DATE = '2026-10-08'
 const DISPLAY_LIMIT = 5000
 
 // Vue 3のOptions APIで、画面の状態と各機能モジュールを連携します。
@@ -57,7 +61,16 @@ Vue.createApp({
 			editedCellKeys: new Set(),
 			highlightColumnsBySheet: {},
 			editingCell: null,
-			editingValue: ''
+			editingValue: '',
+			pdfDocument: null,
+			pdfFileName: '',
+			pdfPageNumber: 1,
+			pdfPageCount: 0,
+			pdfRenderSize: null,
+			pdfMarker: null,
+			coordinateIndex: null,
+			pdfStatusMessage: 'PDF連動なし',
+			resizeTimer: null
 		}
 	},
 
@@ -118,7 +131,44 @@ Vue.createApp({
 		highlightSelectionLabel() {
 			const count = this.highlightedColumnIndexes.length
 			return count ? `${count}列選択中` : '未選択'
+		},
+
+		// PDFと座標JSONの両方を正常に読み込めたかを返します。
+		hasPdfViewer() {
+			return Boolean(this.pdfDocument && this.coordinateIndex)
+		},
+
+		pdfStatus() {
+			return this.hasPdfViewer ? 'PDF連動中' : this.pdfStatusMessage
+		},
+
+		pdfStageStyle() {
+			if (!this.pdfRenderSize) return {}
+			return {
+				width: `${this.pdfRenderSize.width}px`,
+				height: `${this.pdfRenderSize.height}px`
+			}
+		},
+
+		pdfMarkerStyle() {
+			if (!this.pdfMarker || !this.pdfRenderSize || !this.coordinateIndex) return {}
+			const scaleX = this.pdfRenderSize.width / this.coordinateIndex.size[0]
+			const scaleY = this.pdfRenderSize.height / this.coordinateIndex.size[1]
+			return {
+				left: `${this.pdfMarker.x * scaleX}px`,
+				top: `${this.pdfMarker.y * scaleY}px`
+			}
 		}
+	},
+
+	mounted() {
+		window.addEventListener('resize', this.handleWindowResize)
+	},
+
+	beforeUnmount() {
+		window.removeEventListener('resize', this.handleWindowResize)
+		clearTimeout(this.resizeTimer)
+		this.pdfDocument?.destroy()
 	},
 
 	// 画面イベントを受け取り、機能モジュールの処理を呼び出します。
@@ -129,21 +179,37 @@ Vue.createApp({
 		},
 
 		// 読込領域へドロップされたExcelファイルを受け取ります。
-		handleDrop(event) {
+		async handleDrop(event) {
 			this.isDragging = false
-			const [file] = event.dataTransfer.files
-			if (file) this.loadExcel(file)
+			try {
+				this.loadDataSet(await getDroppedFiles(event.dataTransfer))
+			} catch {
+				this.errorMessage = 'ドロップされたフォルダーを読み込めませんでした。'
+			}
 		},
 
 		// ファイル選択ボタンで選ばれたExcelファイルを受け取ります。
 		handleFileSelect(event) {
-			const [file] = event.target.files
-			if (file) this.loadExcel(file)
+			this.loadDataSet([...event.target.files])
 			event.target.value = ''
 		},
 
+		// 選択ファイルからExcelを探し、同名のPDFとJSONも読み込み対象にします。
+		loadDataSet(files) {
+			const excelFiles = files.filter(file => /\.(xlsx|xls)$/i.test(file.name))
+			if (!excelFiles.length) {
+				this.errorMessage = 'Excelファイル（.xlsx または .xls）を選択してください。'
+				return
+			}
+			if (excelFiles.length > 1) {
+				this.errorMessage = 'Excelファイルが複数あります。対象のExcelが1つだけ入ったフォルダーを選択してください。'
+				return
+			}
+			this.loadExcel(excelFiles[0], files)
+		},
+
 		// Excelファイルを読み込み、シート一覧と最初のシートを準備します。
-		async loadExcel(file) {
+		async loadExcel(file, selectedFiles = [file]) {
 			this.errorMessage = ''
 
 			if (!/\.(xlsx|xls)$/i.test(file.name)) {
@@ -152,6 +218,7 @@ Vue.createApp({
 			}
 
 			this.isLoading = true
+			await this.resetPdfViewer()
 			try {
 				const workbook = await readExcelFile(file, XLSX)
 				if (!workbook.SheetNames.length) throw new Error('シートが見つかりませんでした。')
@@ -163,6 +230,7 @@ Vue.createApp({
 				this.editedCellKeys = new Set()
 				this.highlightColumnsBySheet = {}
 				this.loadSelectedSheet()
+				await this.loadPdfCompanions(file, selectedFiles)
 			} catch (error) {
 				this.errorMessage = error.message || 'ファイルを読み込めませんでした。'
 			} finally {
@@ -170,10 +238,122 @@ Vue.createApp({
 			}
 		},
 
+		// 選択したフォルダー内から、Excelと同じディレクトリにある補助ファイルを取得します。
+		async getCompanionFile(selectedFiles, excelFile, fileName, responseType) {
+			const selected = findSiblingFile(selectedFiles, excelFile, fileName)
+			if (!selected) return null
+			return responseType === 'json' ? JSON.parse(await selected.text()) : selected
+		},
+
+		// 同一ベース名のPDFとJSONが両方ある場合だけPDF連動を開始します。
+		async loadPdfCompanions(excelFile, selectedFiles) {
+			const baseName = excelFile.name.replace(/\.(xlsx|xls)$/i, '')
+			const pdfFileName = `${baseName}.pdf`
+			const jsonFileName = `${baseName}.json`
+			const [pdfSource, coordinateData] = await Promise.all([
+				this.getCompanionFile(selectedFiles, excelFile, pdfFileName, 'arrayBuffer'),
+				this.getCompanionFile(selectedFiles, excelFile, jsonFileName, 'json')
+			])
+
+			if (!pdfSource || !coordinateData) {
+				this.pdfStatusMessage = 'PDF連動なし'
+				return
+			}
+
+			try {
+				const coordinateIndex = createCoordinateIndex(coordinateData, {
+					pdf: pdfFileName,
+					workbook: excelFile.name
+				})
+				const pdfDocument = await loadPdfDocument(pdfSource)
+				if (coordinateIndex.page > pdfDocument.numPages) {
+					throw new Error('座標JSONのページがPDFに存在しません。')
+				}
+				const page = await pdfDocument.getPage(coordinateIndex.page)
+				const viewport = page.getViewport({ scale: 1 })
+				const [expectedWidth, expectedHeight] = coordinateIndex.size
+				if (Math.abs(viewport.width - expectedWidth) > 1 || Math.abs(viewport.height - expectedHeight) > 1) {
+					throw new Error('PDFと座標JSONのページサイズが一致しません。')
+				}
+
+				this.coordinateIndex = coordinateIndex
+				// PDF.jsのprivate fieldをVueのProxyで包まないよう、監視対象外として保持します。
+				this.pdfDocument = Vue.markRaw(pdfDocument)
+				this.pdfFileName = pdfFileName
+				this.pdfPageNumber = coordinateIndex.page
+				this.pdfPageCount = pdfDocument.numPages
+				await this.$nextTick()
+				await this.renderCurrentPdfPage()
+			} catch (error) {
+				await this.resetPdfViewer()
+				this.pdfStatusMessage = `PDF連動なし：${error.message}`
+			}
+		},
+
+		// PDF連動用の状態を破棄し、Excel単体表示へ戻します。
+		async resetPdfViewer() {
+			const documentToDestroy = this.pdfDocument
+			this.pdfDocument = null
+			this.pdfFileName = ''
+			this.pdfPageNumber = 1
+			this.pdfPageCount = 0
+			this.pdfRenderSize = null
+			this.pdfMarker = null
+			this.coordinateIndex = null
+			this.pdfStatusMessage = 'PDF連動なし'
+			if (documentToDestroy) await documentToDestroy.destroy()
+		},
+
+		// 現在のPDFページを右側の表示幅へ合わせて描画します。
+		async renderCurrentPdfPage() {
+			if (!this.pdfDocument || !this.$refs.pdfCanvas || !this.$refs.pdfScroll) return
+			this.pdfRenderSize = await renderPdfPage(
+				this.pdfDocument,
+				this.pdfPageNumber,
+				this.$refs.pdfCanvas,
+				this.$refs.pdfScroll.clientWidth
+			)
+		},
+
+		// 表セルへマウスを重ねたとき、対応するPDF座標へマーカーを表示します。
+		async showPdfMarker(sourceIndex, columnIndex) {
+			if (!this.hasPdfViewer) return
+			const marker = getCellCoordinate(
+				this.coordinateIndex,
+				this.selectedSheetName,
+				sourceIndex,
+				columnIndex
+			)
+			this.pdfMarker = marker
+			if (!marker) return
+			await this.$nextTick()
+			this.scrollPdfMarkerIntoView()
+		},
+
+		clearPdfMarker() {
+			this.pdfMarker = null
+		},
+
+		// マーカーがPDF表示領域の中央付近に見えるようスクロールします。
+		scrollPdfMarkerIntoView() {
+			const scroll = this.$refs.pdfScroll
+			const marker = this.$refs.pdfMarker
+			if (!scroll || !marker) return
+			const left = marker.offsetLeft - scroll.clientWidth / 2
+			const top = marker.offsetTop - scroll.clientHeight / 2
+			scroll.scrollTo({ left: Math.max(0, left), top: Math.max(0, top), behavior: 'smooth' })
+		},
+
+		handleWindowResize() {
+			clearTimeout(this.resizeTimer)
+			this.resizeTimer = setTimeout(() => this.renderCurrentPdfPage(), 150)
+		},
+
 		// 選択されたシートから、見出しとデータ行を読み込みます。
 		loadSelectedSheet() {
 			this.errorMessage = ''
 			this.closeCellModal()
+			this.clearPdfMarker()
 			this.clearSearch()
 			this.selectedHeaderIndex1 = 0
 			this.selectedHeaderIndex2 = 0
