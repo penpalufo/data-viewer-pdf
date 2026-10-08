@@ -19,7 +19,8 @@
 body {
 	margin: 0;
 	min-width: 320px;
-	min-height: 100vh;
+	height: 100vh;
+	overflow: hidden;
 	color: var(--ink);
 	background: var(--canvas);
 }
@@ -29,7 +30,13 @@ body {
 
 button, input, select { font: inherit; }
 
-#app { min-height: 100vh; }
+#app {
+	display: flex;
+	height: 100vh;
+	min-height: 0;
+	flex-direction: column;
+	overflow: hidden;
+}
 
 /* アプリ名とバージョンを表示する上部ヘッダーです。 */
 .app-header {
@@ -62,7 +69,14 @@ h1 { margin: 0; font-size: clamp(1.2rem, 2vw, 1.55rem); letter-spacing: -.02em; 
 	border-radius: 999px;
 }
 
-main { padding: 12px clamp(12px, 3vw, 40px) 24px; }
+main {
+	display: flex;
+	min-height: 0;
+	flex: 1;
+	flex-direction: column;
+	overflow: hidden;
+	padding: 12px clamp(12px, 3vw, 40px);
+}
 
 /* Excelファイルを受け取るドラッグ＆ドロップ領域です。 */
 .drop-zone {
@@ -298,7 +312,12 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 .pdf-status.active { color: var(--accent); }
 
 /* PDF連動時に、Excel表とPDFプレビューを同じ幅で左右へ並べます。 */
-.viewer-layout { min-width: 0; }
+.viewer-layout {
+	display: flex;
+	min-width: 0;
+	min-height: 0;
+	flex: 1;
+}
 .viewer-layout.has-pdf {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -307,21 +326,19 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 
 /* 見出しを固定したまま、表を縦横にスクロールできる領域です。 */
 .table-shell {
-	max-height: calc(100vh - 260px);
-	min-height: 260px;
+	width: 100%;
+	min-height: 0;
+	flex: 1;
 	overflow: auto;
 	background: var(--panel);
 	border: 1px solid var(--line);
 	box-shadow: 0 12px 30px rgba(29, 56, 54, .07);
 }
 
-.viewer-layout.has-pdf .table-shell { max-height: calc(100vh - 260px); }
-
 .pdf-panel {
 	display: flex;
 	min-width: 0;
-	min-height: 260px;
-	max-height: calc(100vh - 260px);
+	min-height: 0;
 	flex-direction: column;
 	overflow: hidden;
 	background: #dce4e3;
@@ -394,8 +411,32 @@ tbody tr:hover td { background: #eaf7f4; }
 .catalog-link:hover { color: #075e57; }
 .row-number { position: sticky; left: 0; z-index: 1; width: 62px; min-width: 62px; color: #71817f; text-align: right; background: #f1f6f5; }
 thead .row-number { z-index: 3; color: #b9d6d2; background: #173f3d; }
+.sticky-product-column {
+	position: sticky;
+	left: 62px;
+	z-index: 1;
+	min-width: 120px;
+	box-shadow: 2px 0 0 #cbd9d6, 7px 0 10px -9px rgba(23, 37, 38, .7);
+}
+thead .sticky-product-column {
+	z-index: 3;
+	background: #245250;
+}
+.selectable-row-number { cursor: pointer; user-select: none; }
+.selectable-row-number:hover, .selectable-row-number:focus-visible {
+	color: var(--accent-dark);
+	background: #dff4f0;
+	outline: 2px solid var(--accent);
+	outline-offset: -2px;
+}
+.viewer-layout tbody tr.selected-row td { background: #fff0a8 !important; }
+.viewer-layout tbody tr.selected-row .row-number {
+	color: #654f00;
+	background: #f6d84a !important;
+	font-weight: 900;
+}
 .empty-cell { height: 150px; color: var(--muted); text-align: center; }
-.limit-note { margin: 10px 2px 0; color: var(--muted); font-size: .8rem; }
+.limit-note { flex: 0 0 auto; margin: 6px 2px 0; color: var(--muted); font-size: .8rem; }
 
 /* Excelを読み込む前に表示する待機状態です。 */
 .empty-state { padding: 54px 20px; color: var(--muted); text-align: center; }
@@ -485,9 +526,8 @@ thead .row-number { z-index: 3; color: #b9d6d2; background: #173f3d; }
 	.search-controls { justify-content: flex-start; }
 	.case-toggle { margin-left: 0; }
 	.file-summary strong { max-width: 75vw; }
-	.table-shell { max-height: calc(100vh - 400px); }
 	.viewer-layout.has-pdf { grid-template-columns: 1fr; }
-	.viewer-layout.has-pdf .table-shell, .pdf-panel { max-height: 55vh; }
+	.viewer-layout.has-pdf { grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
 }
 
 @media (max-width: 720px) {
@@ -507,8 +547,6 @@ thead .row-number { z-index: 3; color: #b9d6d2; background: #173f3d; }
 	.highlight-control summary { width: 100%; }
 	.highlight-panel { width: min(320px, calc(100vw - 48px)); }
 	.and-search { grid-column: 1 / -1; }
-	.table-shell { max-height: calc(100vh - 480px); }
-	.viewer-layout.has-pdf .table-shell, .pdf-panel { max-height: 52vh; }
 	.cell-modal { padding: 18px; }
 	.modal-editor textarea { min-height: 180px; }
 }

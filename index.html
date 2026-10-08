@@ -9,10 +9,10 @@
 		<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230f766e'/%3E%3Cpath d='M18 16h28v32H18z' fill='white' opacity='.96'/%3E%3Cpath d='M18 25h28M18 35h28M29 16v32' stroke='%230f766e' stroke-width='3'/%3E%3C/svg%3E" />
 
 		<!-- 画面デザインと、ローカル保存したVue・SheetJS・アプリ本体を読み込みます。 -->
-		<link rel="stylesheet" href="./style.css?v=0.10.0-marker" />
+		<link rel="stylesheet" href="./style.css?v=0.10.1-sticky-product" />
 		<script src="./vendor/vue.global.prod.js"></script>
 		<script src="./vendor/xlsx.full.min.js"></script>
-		<script type="module" src="./app.js?v=0.10.0-folder"></script>
+		<script type="module" src="./app.js?v=0.10.1-sticky-product"></script>
 	</head>
 	<body>
 		<!-- Vueが操作するアプリ全体の領域です。読み込み前はv-cloakで非表示にします。 -->
@@ -174,18 +174,35 @@
 							<thead>
 								<tr>
 									<th class="row-number">#</th>
-									<th v-for="(header, index) in headers" :key="`${header}-${index}`">{{ header }}</th>
+									<th
+										v-for="(header, index) in headers"
+										:key="`${header}-${index}`"
+										:class="{ 'sticky-product-column': isProductNumberColumn(index) }"
+									>{{ header }}</th>
 								</tr>
 							</thead>
 							<tbody>
-								<tr v-for="(item, resultIndex) in visibleRows" :key="item.sourceIndex">
-									<td class="row-number">{{ item.sourceIndex + 2 }}</td>
+								<tr
+									v-for="(item, resultIndex) in visibleRows"
+									:key="item.sourceIndex"
+									:class="{ 'selected-row': selectedRowSourceIndex === item.sourceIndex }"
+								>
+									<td
+										class="row-number selectable-row-number"
+										role="button"
+										tabindex="0"
+										:title="selectedRowSourceIndex === item.sourceIndex ? '行のハイライトを解除' : 'この行をハイライト'"
+										@click="toggleSelectedRow(item.sourceIndex)"
+										@keydown.enter.prevent="toggleSelectedRow(item.sourceIndex)"
+										@keydown.space.prevent="toggleSelectedRow(item.sourceIndex)"
+									>{{ item.sourceIndex + 2 }}</td>
 									<td
 										v-for="(_, index) in headers"
 										:key="index"
 										:class="{
 											'editable-cell': true,
-											'value-changed': isDifferentFromPrevious(resultIndex, index)
+											'value-changed': isDifferentFromPrevious(resultIndex, index),
+											'sticky-product-column': isProductNumberColumn(index)
 										}"
 										:title="displayValue(item.row[index])"
 										@mouseenter="showPdfMarker(item.sourceIndex, index)"

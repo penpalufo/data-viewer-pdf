@@ -1,5 +1,6 @@
 /* Excel Data Viewer
 	* Version history:
+	* 0.10.1 (2026-10-08) Fitted the workspace to the browser height with internal scrolling.
 	* 0.10.0 (2026-10-08) Added linked PDF display and coordinate markers.
 	* 0.3.3 (2026-09-29) Added catalog links to publication page cells.
 	* 0.3.2 (2026-09-29) Applied value-change highlighting within filtered results.
@@ -32,7 +33,7 @@ import { loadPdfDocument, renderPdfPage } from './js/pdf.js?v=0.10.0-fix1'
 import { findSiblingFile, getDroppedFiles } from './js/files.js?v=0.10.0-folder'
 
 // アプリ全体で使用するバージョン情報と表示件数の上限です。
-const APP_VERSION = '0.10.0'
+const APP_VERSION = '0.10.1'
 const RELEASE_DATE = '2026-10-08'
 const DISPLAY_LIMIT = 5000
 
@@ -70,6 +71,7 @@ Vue.createApp({
 			pdfMarker: null,
 			coordinateIndex: null,
 			pdfStatusMessage: 'PDF連動なし',
+			selectedRowSourceIndex: null,
 			resizeTimer: null
 		}
 	},
@@ -229,6 +231,7 @@ Vue.createApp({
 				this.selectedSheetName = this.sheetNames[0]
 				this.editedCellKeys = new Set()
 				this.highlightColumnsBySheet = {}
+				this.selectedRowSourceIndex = null
 				this.loadSelectedSheet()
 				await this.loadPdfCompanions(file, selectedFiles)
 			} catch (error) {
@@ -354,6 +357,7 @@ Vue.createApp({
 			this.errorMessage = ''
 			this.closeCellModal()
 			this.clearPdfMarker()
+			this.selectedRowSourceIndex = null
 			this.clearSearch()
 			this.selectedHeaderIndex1 = 0
 			this.selectedHeaderIndex2 = 0
@@ -361,6 +365,13 @@ Vue.createApp({
 			const table = getSheetTable(this.workbook, this.selectedSheetName, XLSX)
 			this.headers = table.headers
 			this.rows = table.rows
+		},
+
+		// 左端の行番号をクリックするたびに、その行の選択状態を切り替えます。
+		toggleSelectedRow(sourceIndex) {
+			this.selectedRowSourceIndex = this.selectedRowSourceIndex === sourceIndex
+				? null
+				: sourceIndex
 		},
 
 		// 選択列の値が、検索結果内の直前行から変化したかを判定します。
@@ -454,6 +465,11 @@ Vue.createApp({
 		// 指定された列が「掲載ページ」列かどうかを判定します。
 		isCatalogPageColumn(columnIndex) {
 			return String(this.headers[columnIndex]).trim() === '掲載ページ'
+		},
+
+		// 「製品番号」列を横スクロール時の固定対象として判定します。
+		isProductNumberColumn(columnIndex) {
+			return String(this.headers[columnIndex]).trim() === '製品番号'
 		},
 
 		// 掲載ページの値から、電子カタログを開くURLを作ります。
