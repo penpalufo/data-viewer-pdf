@@ -10,47 +10,69 @@ export function getExcelColumnName(columnIndex) {
 	return name
 }
 
-// 座標JSONの基本形式を確認し、シート名と行番号から引ける索引を作ります。
-export function createCoordinateIndex(data, expectedNames) {
-	if (!data || data.v !== 2 || !Array.isArray(data.sheets)) {
+function toPoint(value) {
+	const point = Array.isArray(value) ? value : value?.point
+	if (!Array.isArray(point) || point.length !== 2) return null
+	const [x, y] = point.map(Number)
+	return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null
+}
+
+function toSize(value, fallback) {
+	const size = Array.isArray(value) && value.length === 2 ? value : fallback
+	if (!Array.isArray(size) || size.length !== 2) return null
+	const normalized = size.map(Number)
+	return normalized.every(number => Number.isFinite(number) && number > 0) ? normalized : null
+}
+
+function getCatalogPageFromPdfName(pdfName) {
+	const match = String(pdfName || '').match(/(\d{3,4})(?=\D*\.pdf$)/i)
+	return match ? Number(match[1]) : null
+}
+
+// v2の単一PDF形式と、セルごとにPDF情報を持てる統合形式を共通の索引へ正規化します。
+export function createCoordinateIndex(data) {
+	if (!data || ![2, 3].includes(Number(data.v)) || !Array.isArray(data.sheets)) {
 		throw new Error('座標JSONの形式またはバージョンに対応していません。')
 	}
-	if (data.coordinate_system !== 'pdf_points_top_left' || data.point_rule !== 'bbox_center') {
+	if (data.coordinate_system && data.coordinate_system !== 'pdf_points_top_left') {
 		throw new Error('座標JSONの座標系に対応していません。')
 	}
-	if (!Array.isArray(data.size) || data.size.length !== 2) {
-		throw new Error('座標JSONにPDFサイズがありません。')
+	if (data.point_rule && data.point_rule !== 'bbox_center') {
+		throw new Error('座標JSONの座標ルールに対応していません。')
 	}
-	if (data.pdf && data.pdf !== expectedNames.pdf) {
-		throw new Error(`座標JSONが参照するPDFは ${data.pdf} です。`)
-	}
-	// workbookは生成時の元ファイル名を記録した参考情報です。
-	// 配布時に同一ベース名へ改名される場合があるため、照合の必須条件にはしません。
 
+	const defaultSize = toSize(data.size, null)
 	const sheets = new Map()
 	for (const sheet of data.sheets) {
 		if (!sheet || typeof sheet.name !== 'string' || !Array.isArray(sheet.records)) continue
 		const records = new Map()
 		for (const record of sheet.records) {
 			if (!Number.isInteger(record?.row) || !record.cells || typeof record.cells !== 'object') continue
-			records.set(record.row, record)
+			const cells = new Map()
+			for (const [column, value] of Object.entries(record.cells)) {
+				const point = toPoint(value)
+				if (!point) continue
+				const metadata = Array.isArray(value) ? {} : value
+				const pdf = String(metadata.pdf ?? record.pdf ?? sheet.pdf ?? data.pdf ?? '')
+				cells.set(column.toUpperCase(), {
+					x: point[0],
+					y: point[1],
+					page: Number(metadata.page ?? record.page ?? sheet.page ?? data.page) || 1,
+					sourcePage: Number(metadata.source_page ?? record.source_page ?? sheet.source_page ?? data.source_page) || getCatalogPageFromPdfName(pdf),
+					pdf,
+					size: toSize(metadata.size ?? record.size ?? sheet.size, defaultSize)
+				})
+			}
+			records.set(record.row, cells)
 		}
 		sheets.set(sheet.name, records)
 	}
 
-	return {
-		page: Number(data.page) || 1,
-		size: data.size.map(Number),
-		sheets
-	}
+	return { sheets, workbook: String(data.workbook || '') }
 }
 
-// 表のセルに対応するPDF上の中心座標を返します。
+// 表のセルに対応するPDF上の中心座標と、その座標が属する元ページ情報を返します。
 export function getCellCoordinate(index, sheetName, sourceIndex, columnIndex) {
-	const record = index?.sheets.get(sheetName)?.get(sourceIndex + 2)
-	const point = record?.cells?.[getExcelColumnName(columnIndex)]
-	if (!Array.isArray(point) || point.length !== 2) return null
-	const [x, y] = point.map(Number)
-	return Number.isFinite(x) && Number.isFinite(y) ? { x, y, page: index.page } : null
+	return index?.sheets.get(sheetName)?.get(sourceIndex + 2)?.get(getExcelColumnName(columnIndex)) || null
 }
 

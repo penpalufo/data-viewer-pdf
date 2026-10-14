@@ -9,10 +9,10 @@
 		<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230f766e'/%3E%3Cpath d='M18 16h28v32H18z' fill='white' opacity='.96'/%3E%3Cpath d='M18 25h28M18 35h28M29 16v32' stroke='%230f766e' stroke-width='3'/%3E%3C/svg%3E" />
 
 		<!-- 画面デザインと、ローカル保存したVue・SheetJS・アプリ本体を読み込みます。 -->
-		<link rel="stylesheet" href="./style.css?v=0.10.1-sticky-product" />
+		<link rel="stylesheet" href="./style.css?v=0.20.0" />
 		<script src="./vendor/vue.global.prod.js"></script>
 		<script src="./vendor/xlsx.full.min.js"></script>
-		<script type="module" src="./app.js?v=0.10.1-sticky-product"></script>
+		<script type="module" src="./app.js?v=0.20.0"></script>
 	</head>
 	<body>
 		<!-- Vueが操作するアプリ全体の領域です。読み込み前はv-cloakで非表示にします。 -->
@@ -27,25 +27,47 @@
 			</header>
 
 			<main>
-				<!-- Excelファイルのドラッグ＆ドロップとファイル選択を受け付けます。 -->
-				<section
-					class="drop-zone"
-					:class="{ 'is-dragging': isDragging, 'is-loading': isLoading, 'has-data': headers.length }"
-					@dragenter.prevent="isDragging = true"
-					@dragover.prevent="isDragging = true"
-					@dragleave.prevent="handleDragLeave"
-					@drop.prevent="handleDrop"
-				>
-					<div class="file-mark" aria-hidden="true">XLSX</div>
-					<div class="drop-copy">
-						<strong>{{ isLoading ? 'フォルダーを読み込んでいます…' : headers.length ? '別のデータフォルダーを読み込む' : 'データフォルダーをここにドロップ' }}</strong>
-						<span>同じフォルダーにある同名の.xlsx・.pdf・.jsonを読み込みます</span>
-					</div>
-					<label class="file-button" :class="{ disabled: isLoading }">
-						フォルダーを選択
-						<input type="file" webkitdirectory directory multiple :disabled="isLoading" @change="handleFileSelect" />
-					</label>
-				</section>
+				<div class="import-grid">
+					<!-- Excelと座標JSONを含むデータフォルダーを受け付けます。 -->
+					<section
+						class="drop-zone"
+						:class="{ 'is-dragging': isDataDragging, 'is-loading': isLoading, 'has-data': headers.length }"
+						@dragenter.prevent="isDataDragging = true"
+						@dragover.prevent="isDataDragging = true"
+						@dragleave.prevent="handleDragLeave($event, 'isDataDragging')"
+						@drop.prevent="handleDrop"
+					>
+						<div class="file-mark" aria-hidden="true">DATA</div>
+						<div class="drop-copy">
+							<strong>{{ isLoading ? '読み込んでいます…' : headers.length ? '別のデータフォルダーを読み込む' : 'Excel＋JSONフォルダーをドロップ' }}</strong>
+							<span>Excelと座標JSONを読み込みます（PDFは不要）</span>
+						</div>
+						<label class="file-button" :class="{ disabled: isLoading }">
+							フォルダーを選択
+							<input type="file" webkitdirectory directory multiple :disabled="isLoading" @change="handleFileSelect" />
+						</label>
+					</section>
+
+					<!-- 表示するPDFはデータフォルダーと独立して受け付けます。 -->
+					<section
+						class="drop-zone pdf-drop-zone"
+						:class="{ 'is-dragging': isPdfDragging, 'is-loading': isLoading, 'has-data': hasPdfViewer }"
+						@dragenter.prevent="isPdfDragging = true"
+						@dragover.prevent="isPdfDragging = true"
+						@dragleave.prevent="handleDragLeave($event, 'isPdfDragging')"
+						@drop.prevent="handlePdfDrop"
+					>
+						<div class="file-mark pdf-mark" aria-hidden="true">PDF</div>
+						<div class="drop-copy">
+							<strong>{{ hasPdfViewer ? pdfFileName : '表示するPDFをドロップ' }}</strong>
+							<span>Excel・JSONとのファイル名一致は不要です</span>
+						</div>
+						<label class="file-button pdf-file-button" :class="{ disabled: isLoading }">
+							PDFを選択
+							<input type="file" accept="application/pdf,.pdf" :disabled="isLoading" @change="handlePdfFileSelect" />
+						</label>
+					</section>
+				</div>
 
 				<!-- ファイル形式や読み込み処理のエラーを表示します。 -->
 				<p v-if="errorMessage" class="message error" role="alert">{{ errorMessage }}</p>
@@ -232,7 +254,11 @@
 								<strong>{{ pdfFileName }}</strong>
 								<span>ページ {{ pdfPageNumber }} / {{ pdfPageCount }}</span>
 							</div>
-							<button type="button" @click="renderCurrentPdfPage">表示を合わせる</button>
+							<nav class="pdf-page-actions" aria-label="PDFページ操作">
+								<button type="button" :disabled="pdfPageNumber <= 1" @click="changePdfPage(-1)">前へ</button>
+								<button type="button" :disabled="pdfPageNumber >= pdfPageCount" @click="changePdfPage(1)">次へ</button>
+								<button type="button" @click="renderCurrentPdfPage">幅に合わせる</button>
+							</nav>
 						</header>
 						<div ref="pdfScroll" class="pdf-scroll">
 							<div ref="pdfStage" class="pdf-stage" :style="pdfStageStyle">
@@ -248,9 +274,29 @@
 				</template>
 
 				<!-- Excelを読み込む前に表示する案内です。 -->
-				<section v-else class="empty-state">
+				<section v-else-if="!hasPdfViewer" class="empty-state">
 					<span>準備完了</span>
 					<p>ファイルは外部へ送信されず、このブラウザ内だけで処理されます。</p>
+				</section>
+
+				<!-- PDFを先に読み込んだ場合も、データフォルダーとは独立して表示します。 -->
+				<section v-else class="pdf-panel standalone-pdf" aria-label="PDFプレビュー">
+					<header class="pdf-toolbar">
+						<div>
+							<strong>{{ pdfFileName }}</strong>
+							<span>ページ {{ pdfPageNumber }} / {{ pdfPageCount }}・データフォルダーを読み込むと座標連動できます</span>
+						</div>
+						<nav class="pdf-page-actions" aria-label="PDFページ操作">
+							<button type="button" :disabled="pdfPageNumber <= 1" @click="changePdfPage(-1)">前へ</button>
+							<button type="button" :disabled="pdfPageNumber >= pdfPageCount" @click="changePdfPage(1)">次へ</button>
+							<button type="button" @click="renderCurrentPdfPage">幅に合わせる</button>
+						</nav>
+					</header>
+					<div ref="pdfScroll" class="pdf-scroll">
+						<div ref="pdfStage" class="pdf-stage" :style="pdfStageStyle">
+							<canvas ref="pdfCanvas"></canvas>
+						</div>
+					</div>
 				</section>
 			</main>
 

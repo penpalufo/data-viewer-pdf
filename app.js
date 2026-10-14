@@ -1,5 +1,6 @@
 /* Excel Data Viewer
 	* Version history:
+	* 0.20.0 (2026-10-14) Separated Excel/JSON data loading from PDF loading and added multi-source coordinates.
 	* 0.10.1 (2026-10-08) Fitted the workspace to the browser height with internal scrolling.
 	* 0.10.0 (2026-10-08) Added linked PDF display and coordinate markers.
 	* 0.3.3 (2026-09-29) Added catalog links to publication page cells.
@@ -29,12 +30,12 @@ import {
 } from './js/highlight.js'
 import { displayValue, formatNumber, getCatalogPageUrl } from './js/utils.js'
 import { createCoordinateIndex, getCellCoordinate } from './js/coordinates.js'
-import { loadPdfDocument, renderPdfPage } from './js/pdf.js?v=0.10.0-fix1'
-import { findSiblingFile, getDroppedFiles } from './js/files.js?v=0.10.0-folder'
+import { loadPdfDocument, renderPdfPage } from './js/pdf.js?v=0.20.0'
+import { findSiblingFile, getDroppedFiles } from './js/files.js?v=0.20.0'
 
 // アプリ全体で使用するバージョン情報と表示件数の上限です。
-const APP_VERSION = '0.10.1'
-const RELEASE_DATE = '2026-10-08'
+const APP_VERSION = '0.20.0'
+const RELEASE_DATE = '2026-10-14'
 const DISPLAY_LIMIT = 5000
 
 // Vue 3のOptions APIで、画面の状態と各機能モジュールを連携します。
@@ -56,7 +57,8 @@ Vue.createApp({
 			selectedHeaderIndex2: 0,
 			searchText2: '',
 			caseSensitive: false,
-			isDragging: false,
+			isDataDragging: false,
+			isPdfDragging: false,
 			isLoading: false,
 			errorMessage: '',
 			editedCellKeys: new Set(),
@@ -70,9 +72,12 @@ Vue.createApp({
 			pdfRenderSize: null,
 			pdfMarker: null,
 			coordinateIndex: null,
-			pdfStatusMessage: 'PDF連動なし',
+			coordinateFileName: '',
+			coordinateStatusMessage: '座標JSONなし',
+			pdfStatusMessage: 'PDF未読込',
 			selectedRowSourceIndex: null,
-			resizeTimer: null
+			resizeTimer: null,
+			markerRequestId: 0
 		}
 	},
 
@@ -135,13 +140,15 @@ Vue.createApp({
 			return count ? `${count}列選択中` : '未選択'
 		},
 
-		// PDFと座標JSONの両方を正常に読み込めたかを返します。
+		// PDFはExcelや座標JSONの有無にかかわらず表示できます。
 		hasPdfViewer() {
-			return Boolean(this.pdfDocument && this.coordinateIndex)
+			return Boolean(this.pdfDocument)
 		},
 
 		pdfStatus() {
-			return this.hasPdfViewer ? 'PDF連動中' : this.pdfStatusMessage
+			if (!this.pdfDocument) return `${this.coordinateStatusMessage}・PDF未読込`
+			if (this.coordinateIndex && this.pdfStatusMessage !== 'PDF表示中') return this.pdfStatusMessage
+			return this.coordinateIndex ? '座標連動可能' : `PDF表示中・${this.coordinateStatusMessage}`
 		},
 
 		pdfStageStyle() {
@@ -153,9 +160,9 @@ Vue.createApp({
 		},
 
 		pdfMarkerStyle() {
-			if (!this.pdfMarker || !this.pdfRenderSize || !this.coordinateIndex) return {}
-			const scaleX = this.pdfRenderSize.width / this.coordinateIndex.size[0]
-			const scaleY = this.pdfRenderSize.height / this.coordinateIndex.size[1]
+			if (!this.pdfMarker || !this.pdfRenderSize || !this.pdfMarker.size) return {}
+			const scaleX = this.pdfRenderSize.width / this.pdfMarker.size[0]
+			const scaleY = this.pdfRenderSize.height / this.pdfMarker.size[1]
 			return {
 				left: `${this.pdfMarker.x * scaleX}px`,
 				top: `${this.pdfMarker.y * scaleY}px`
@@ -176,13 +183,13 @@ Vue.createApp({
 	// 画面イベントを受け取り、機能モジュールの処理を呼び出します。
 	methods: {
 		// ドラッグ中のファイルが読込領域から離れたとき、強調表示を解除します。
-		handleDragLeave(event) {
-			if (!event.currentTarget.contains(event.relatedTarget)) this.isDragging = false
+		handleDragLeave(event, target) {
+			if (!event.currentTarget.contains(event.relatedTarget)) this[target] = false
 		},
 
 		// 読込領域へドロップされたExcelファイルを受け取ります。
 		async handleDrop(event) {
-			this.isDragging = false
+			this.isDataDragging = false
 			try {
 				this.loadDataSet(await getDroppedFiles(event.dataTransfer))
 			} catch {
@@ -196,7 +203,7 @@ Vue.createApp({
 			event.target.value = ''
 		},
 
-		// 選択ファイルからExcelを探し、同名のPDFとJSONも読み込み対象にします。
+		// 選択フォルダーからExcelと座標JSONを探します。PDFは右側から別途読み込みます。
 		loadDataSet(files) {
 			const excelFiles = files.filter(file => /\.(xlsx|xls)$/i.test(file.name))
 			if (!excelFiles.length) {
@@ -220,7 +227,7 @@ Vue.createApp({
 			}
 
 			this.isLoading = true
-			await this.resetPdfViewer()
+			this.resetCoordinateData()
 			try {
 				const workbook = await readExcelFile(file, XLSX)
 				if (!workbook.SheetNames.length) throw new Error('シートが見つかりませんでした。')
@@ -233,7 +240,11 @@ Vue.createApp({
 				this.highlightColumnsBySheet = {}
 				this.selectedRowSourceIndex = null
 				this.loadSelectedSheet()
-				await this.loadPdfCompanions(file, selectedFiles)
+				await this.loadCoordinateCompanion(file, selectedFiles)
+				if (this.pdfDocument) {
+					await this.$nextTick()
+					await this.renderCurrentPdfPage()
+				}
 			} catch (error) {
 				this.errorMessage = error.message || 'ファイルを読み込めませんでした。'
 			} finally {
@@ -241,55 +252,74 @@ Vue.createApp({
 			}
 		},
 
-		// 選択したフォルダー内から、Excelと同じディレクトリにある補助ファイルを取得します。
-		async getCompanionFile(selectedFiles, excelFile, fileName, responseType) {
-			const selected = findSiblingFile(selectedFiles, excelFile, fileName)
-			if (!selected) return null
-			return responseType === 'json' ? JSON.parse(await selected.text()) : selected
+		// Excelと同名のJSONを優先し、フォルダー内にJSONが1つだけならそれも使用します。
+		async loadCoordinateCompanion(excelFile, selectedFiles) {
+			const baseName = excelFile.name.replace(/\.(xlsx|xls)$/i, '')
+			const jsonFileName = `${baseName}.json`
+			let jsonFile = findSiblingFile(selectedFiles, excelFile, jsonFileName)
+			if (!jsonFile) {
+				const jsonFiles = selectedFiles.filter(file => /\.json$/i.test(file.name))
+				if (jsonFiles.length === 1) jsonFile = jsonFiles[0]
+				else if (jsonFiles.length > 1) throw new Error('座標JSONが複数あります。Excelと同名のJSONを配置してください。')
+			}
+			if (!jsonFile) return
+			try {
+				this.coordinateIndex = createCoordinateIndex(JSON.parse(await jsonFile.text()))
+				this.coordinateFileName = jsonFile.name
+				this.coordinateStatusMessage = `座標JSON読込済み：${jsonFile.name}`
+			} catch (error) {
+				this.resetCoordinateData()
+				throw error
+			}
 		},
 
-		// 同一ベース名のPDFとJSONが両方ある場合だけPDF連動を開始します。
-		async loadPdfCompanions(excelFile, selectedFiles) {
-			const baseName = excelFile.name.replace(/\.(xlsx|xls)$/i, '')
-			const pdfFileName = `${baseName}.pdf`
-			const jsonFileName = `${baseName}.json`
-			const [pdfSource, coordinateData] = await Promise.all([
-				this.getCompanionFile(selectedFiles, excelFile, pdfFileName, 'arrayBuffer'),
-				this.getCompanionFile(selectedFiles, excelFile, jsonFileName, 'json')
-			])
+		resetCoordinateData() {
+			this.coordinateIndex = null
+			this.coordinateFileName = ''
+			this.coordinateStatusMessage = '座標JSONなし'
+			this.clearPdfMarker()
+		},
 
-			if (!pdfSource || !coordinateData) {
-				this.pdfStatusMessage = 'PDF連動なし'
-				return
-			}
-
+		async handlePdfDrop(event) {
+			this.isPdfDragging = false
 			try {
-				const coordinateIndex = createCoordinateIndex(coordinateData, {
-					pdf: pdfFileName,
-					workbook: excelFile.name
-				})
-				const pdfDocument = await loadPdfDocument(pdfSource)
-				if (coordinateIndex.page > pdfDocument.numPages) {
-					throw new Error('座標JSONのページがPDFに存在しません。')
+				const files = await getDroppedFiles(event.dataTransfer)
+				const pdfFiles = files.filter(file => /\.pdf$/i.test(file.name))
+				if (pdfFiles.length !== 1) {
+					this.errorMessage = 'PDFファイルを1つだけドロップしてください。'
+					return
 				}
-				const page = await pdfDocument.getPage(coordinateIndex.page)
-				const viewport = page.getViewport({ scale: 1 })
-				const [expectedWidth, expectedHeight] = coordinateIndex.size
-				if (Math.abs(viewport.width - expectedWidth) > 1 || Math.abs(viewport.height - expectedHeight) > 1) {
-					throw new Error('PDFと座標JSONのページサイズが一致しません。')
-				}
+				await this.loadPdf(pdfFiles[0])
+			} catch (error) {
+				this.errorMessage = error.message || 'ドロップされたPDFを読み込めませんでした。'
+			}
+		},
 
-				this.coordinateIndex = coordinateIndex
-				// PDF.jsのprivate fieldをVueのProxyで包まないよう、監視対象外として保持します。
+		async handlePdfFileSelect(event) {
+			const [file] = [...event.target.files]
+			event.target.value = ''
+			if (file) await this.loadPdf(file)
+		},
+
+		// PDFだけを独立して読み込みます。座標JSONやExcelのファイル名とは照合しません。
+		async loadPdf(file) {
+			this.errorMessage = ''
+			this.isLoading = true
+			await this.resetPdfViewer()
+			try {
+				const pdfDocument = await loadPdfDocument(file)
 				this.pdfDocument = Vue.markRaw(pdfDocument)
-				this.pdfFileName = pdfFileName
-				this.pdfPageNumber = coordinateIndex.page
+				this.pdfFileName = file.name
+				this.pdfPageNumber = 1
 				this.pdfPageCount = pdfDocument.numPages
+				this.pdfStatusMessage = 'PDF表示中'
 				await this.$nextTick()
 				await this.renderCurrentPdfPage()
 			} catch (error) {
 				await this.resetPdfViewer()
-				this.pdfStatusMessage = `PDF連動なし：${error.message}`
+				this.errorMessage = error.message || 'PDFを読み込めませんでした。'
+			} finally {
+				this.isLoading = false
 			}
 		},
 
@@ -302,8 +332,7 @@ Vue.createApp({
 			this.pdfPageCount = 0
 			this.pdfRenderSize = null
 			this.pdfMarker = null
-			this.coordinateIndex = null
-			this.pdfStatusMessage = 'PDF連動なし'
+			this.pdfStatusMessage = 'PDF未読込'
 			if (documentToDestroy) await documentToDestroy.destroy()
 		},
 
@@ -318,23 +347,75 @@ Vue.createApp({
 			)
 		},
 
+		async changePdfPage(delta) {
+			const nextPage = Math.min(this.pdfPageCount, Math.max(1, this.pdfPageNumber + delta))
+			if (nextPage === this.pdfPageNumber) return
+			this.pdfPageNumber = nextPage
+			this.clearPdfMarker()
+			await this.$nextTick()
+			await this.renderCurrentPdfPage()
+		},
+
+		getPdfCatalogRange() {
+			const range = this.pdfFileName.match(/(\d{3,4})\s*[-–]\s*(\d{3,4})(?=\D*\.pdf$)/i)
+			if (range) return [Number(range[1]), Number(range[2])]
+			const single = this.pdfFileName.match(/(\d{3,4})(?=\D*\.pdf$)/i)
+			return single ? [Number(single[1]), Number(single[1])] : null
+		},
+
+		resolvePdfPage(marker) {
+			if (this.pdfPageCount === 1) return 1
+			const range = this.getPdfCatalogRange()
+			if (marker.sourcePage && range && marker.sourcePage >= range[0] && marker.sourcePage <= range[1]) {
+				return marker.sourcePage - range[0] + 1
+			}
+			if (marker.page >= 1 && marker.page <= this.pdfPageCount) return marker.page
+			if (marker.sourcePage >= 1 && marker.sourcePage <= this.pdfPageCount) return marker.sourcePage
+			return null
+		},
+
 		// 表セルへマウスを重ねたとき、対応するPDF座標へマーカーを表示します。
 		async showPdfMarker(sourceIndex, columnIndex) {
-			if (!this.hasPdfViewer) return
+			if (!this.coordinateIndex) return
 			const marker = getCellCoordinate(
 				this.coordinateIndex,
 				this.selectedSheetName,
 				sourceIndex,
 				columnIndex
 			)
-			this.pdfMarker = marker
 			if (!marker) return
+			if (!this.pdfDocument) {
+				this.pdfStatusMessage = '座標あり・PDFを読み込んでください'
+				return
+			}
+			const targetPage = this.resolvePdfPage(marker)
+			if (!targetPage) {
+				this.pdfMarker = null
+				this.pdfStatusMessage = `座標のページを表示中PDFへ対応付けできません（元ページ ${marker.sourcePage || marker.page}）`
+				return
+			}
+			const requestId = ++this.markerRequestId
+			if (targetPage !== this.pdfPageNumber) {
+				this.pdfPageNumber = targetPage
+				await this.$nextTick()
+				await this.renderCurrentPdfPage()
+			}
+			if (requestId !== this.markerRequestId) return
+			if (!marker.size) {
+				const page = await this.pdfDocument.getPage(targetPage)
+				const viewport = page.getViewport({ scale: 1 })
+				marker.size = [viewport.width, viewport.height]
+			}
+			this.pdfMarker = marker
+			this.pdfStatusMessage = '座標表示中'
 			await this.$nextTick()
 			this.scrollPdfMarkerIntoView()
 		},
 
 		clearPdfMarker() {
+			this.markerRequestId += 1
 			this.pdfMarker = null
+			if (this.pdfDocument) this.pdfStatusMessage = 'PDF表示中'
 		},
 
 		// マーカーがPDF表示領域の中央付近に見えるようスクロールします。
